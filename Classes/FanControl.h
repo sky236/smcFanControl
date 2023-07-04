@@ -106,6 +106,9 @@
 	 
 	NSImage *menu_image;
 	NSImage *menu_image_alt;
+    
+    int lastDarkMode;
+    int lastIndex;
 }
 
 @property (nonatomic, strong ) 	NSMutableDictionary *machineDefaultsDict;

@@ -101,6 +101,8 @@ NSUserDefaults *defaults;
 	[pw registerForSleepWakeNotification];
 	[pw registerForPowerChange];
 	
+    lastDarkMode = 0;
+    lastIndex = 0;
 
     //load defaults
     
@@ -112,24 +114,33 @@ NSUserDefaults *defaults;
 
     NSMutableArray *favorites = [[NSMutableArray alloc] init];
     
+    //Default
     NSMutableDictionary *defaultFav = [[NSMutableDictionary alloc] initWithObjectsAndKeys:@"Default", PREF_FAN_TITLE,
                                   [NSKeyedUnarchiver unarchiveObjectWithData:[NSKeyedArchiver archivedDataWithRootObject:[[mdefaults get_machine_defaults] objectForKey:@"Fans"]]], PREF_FAN_ARRAY,nil];
+    [[[defaultFav objectForKey:PREF_FAN_ARRAY] objectAtIndex:0] setObject:[NSNumber numberWithInt:1] forKey:PREF_FAN_AUTO];
 
     [favorites addObject:defaultFav];
     
-    
+    //Higher RPM
+    NSArray *defaultFans = [self defaultFansRPM];
 	NSRange range=[[MachineDefaults computerModel] rangeOfString:@"MacBook"];
 	if (range.length>0) {
-		//for macbooks add a second default
-		NSMutableDictionary *higherFav=[[NSMutableDictionary alloc] initWithObjectsAndKeys:@"Higher RPM", PREF_FAN_TITLE,
-                                        [NSKeyedUnarchiver unarchiveObjectWithData:[NSKeyedArchiver archivedDataWithRootObject:[[mdefaults get_machine_defaults] objectForKey:@"Fans"]]], PREF_FAN_ARRAY,nil];
-		for (NSUInteger i=0;i<[_machineDefaultsDict[@"Fans"] count];i++) {
+        int step = 2;
+        for (NSNumber *highFan in defaultFans) {
+            NSMutableDictionary *higherFav=[[NSMutableDictionary alloc] initWithObjectsAndKeys:highFan.stringValue, PREF_FAN_TITLE,
+                                            [NSKeyedUnarchiver unarchiveObjectWithData:[NSKeyedArchiver archivedDataWithRootObject:[[mdefaults get_machine_defaults] objectForKey:@"Fans"]]], PREF_FAN_ARRAY,nil];
+            if (step == defaultFans.count + 1) {
+                [[[higherFav objectForKey:PREF_FAN_ARRAY] objectAtIndex:0] setObject:[NSNumber numberWithInt:1] forKey:PREF_FAN_AUTO];
+            }
             
-            int min_value=([[[[_machineDefaultsDict objectForKey:@"Fans"] objectAtIndex:i] objectForKey:PREF_FAN_MINSPEED] intValue])*2;
-            [[[higherFav objectForKey:PREF_FAN_ARRAY] objectAtIndex:i] setObject:[NSNumber numberWithInt:min_value] forKey:PREF_FAN_SELSPEED];
-		}
-        [favorites addObject:higherFav];
-
+            for (NSUInteger i=0;i<[_machineDefaultsDict[@"Fans"] count];i++) {
+                int min_value=([[[[_machineDefaultsDict objectForKey:@"Fans"] objectAtIndex:i] objectForKey:PREF_FAN_MINSPEED] intValue])*step;
+                min_value = MIN(min_value, highFan.intValue);
+                [[[higherFav objectForKey:PREF_FAN_ARRAY] objectAtIndex:i] setObject:[NSNumber numberWithInt:min_value] forKey:PREF_FAN_SELSPEED];
+            }
+            [favorites addObject:higherFav];
+            step++;
+        }
 	}
 
 	//sync option for Macbook Pro's
@@ -217,7 +228,7 @@ NSUserDefaults *defaults;
     }
 
 	//add timer for reading to RunLoop
-	_readTimer = [NSTimer scheduledTimerWithTimeInterval:4.0 target:self selector:@selector(readFanData:) userInfo:nil repeats:YES];
+	_readTimer = [NSTimer scheduledTimerWithTimeInterval:3.0 target:self selector:@selector(readFanData:) userInfo:nil repeats:YES];
     if ([_readTimer respondsToSelector:@selector(setTolerance:)]) {
         [_readTimer setTolerance:2.0];
     }
@@ -257,6 +268,8 @@ NSUserDefaults *defaults;
 	statusItem = [[NSStatusBar systemStatusBar] statusItemWithLength: NSVariableStatusItemLength];
 	[statusItem setMenu: theMenu];
     
+    [statusItem addObserver:self  forKeyPath:@"button.effectiveAppearance.name" options:NSKeyValueObservingOptionNew context:NULL];
+        
     if ([statusItem respondsToSelector:@selector(button)]) {
         [statusItem.button setTitle:@"smc..."];
     } else {
@@ -275,6 +288,27 @@ NSUserDefaults *defaults;
     [theMenu setDelegate:self];
 }
 
+- (void)observeValueForKeyPath:(NSString *)keyPath ofObject:(id)object change:(NSDictionary<NSKeyValueChangeKey,id> *)change context:(void *)context {
+    if (object != statusItem) {
+        return;
+    }
+    NSString *mode = change[NSKeyValueChangeNewKey];
+    if ([mode isEqualToString:NSAppearanceNameAqua]) {
+        return;
+    }
+    
+    int darkMode = ![mode.lowercaseString containsString:@"dark"] ? 1 : 2;
+    if (lastDarkMode != darkMode) {
+        NSColor* menuColor = darkMode == 1 ? [NSColor blackColor] : [NSColor whiteColor];
+        NSMutableAttributedString *attr = [[NSMutableAttributedString alloc] initWithAttributedString:statusItem.button.attributedTitle];
+        [attr addAttribute:NSForegroundColorAttributeName value:menuColor  range:NSMakeRange(0,[attr length])];
+
+        if ([statusItem respondsToSelector:@selector(button)]) {
+            [statusItem.button setAttributedTitle:attr];
+        }
+    }
+    lastDarkMode = darkMode;
+}
 
 #pragma mark **Action-Methods**
 - (IBAction)loginItem:(id)sender{
@@ -425,22 +459,23 @@ NSUserDefaults *defaults;
         }
     }
     
+    [self autoAdjustRPM:c_temp];
+    
     // Update the temp and/or fan speed text in the menubar.
     NSMutableAttributedString *s_status = nil;
     NSMutableParagraphStyle *paragraphStyle = nil;
     
-    NSColor *menuColor = (NSColor*)[NSUnarchiver unarchiveObjectWithData:[defaults objectForKey:PREF_MENU_TEXTCOLOR]];
-    BOOL setColor = NO;
-    if (!([[menuColor colorUsingColorSpaceName:
-              NSCalibratedWhiteColorSpace] whiteComponent] == 0.0) || ![statusItem respondsToSelector:@selector(button)]) setColor = YES;
+//    NSColor *menuColor = (NSColor*)[NSUnarchiver unarchiveObjectWithData:[defaults objectForKey:PREF_MENU_TEXTCOLOR]];
+//    BOOL setColor = NO;
+//    if (!([[menuColor colorUsingColorSpaceName:
+//              NSCalibratedWhiteColorSpace] whiteComponent] == 0.0) || ![statusItem respondsToSelector:@selector(button)]) setColor = YES;
     
-    
-    NSString *osxMode = [[NSUserDefaults standardUserDefaults] stringForKey:@"AppleInterfaceStyle"];
-    
-    if (osxMode && !setColor) {
-        menuColor = [NSColor whiteColor];
-        setColor = YES;
-    }
+//    NSString *osxMode = [[NSUserDefaults standardUserDefaults] stringForKey:@"AppleInterfaceStyle"];
+//    
+//    if (osxMode && !setColor) {
+//        menuColor = [NSColor whiteColor];
+//        setColor = YES;
+//    }
     
     switch (menuBarSetting) {
         default:
@@ -450,7 +485,7 @@ NSUserDefaults *defaults;
             if (menuBarSetting==0) {
                 add=@"\n";
                 fsize=9;
-                [statusItem setLength:53];
+                [statusItem setLength:43];
             } else {
                 add=@" ";
                 fsize=11;
@@ -459,13 +494,16 @@ NSUserDefaults *defaults;
             
             s_status=[[NSMutableAttributedString alloc] initWithString:[NSString stringWithFormat:@"%@%@%@",temp,add,fan]];
             paragraphStyle = [[NSParagraphStyle defaultParagraphStyle] mutableCopy];
-            [paragraphStyle setAlignment:NSLeftTextAlignment];
+            paragraphStyle.paragraphSpacing = -4;
+            [paragraphStyle setAlignment:NSCenterTextAlignment];
             [s_status addAttribute:NSFontAttributeName value:[NSFont fontWithName:@"Lucida Grande" size:fsize] range:NSMakeRange(0,[s_status length])];
             [s_status addAttribute:NSParagraphStyleAttributeName value:paragraphStyle range:NSMakeRange(0,[s_status length])];
-            if (menuBarSetting == 0)
-                [s_status addAttribute:NSBaselineOffsetAttributeName value:[NSNumber numberWithFloat: -6] range:NSMakeRange(0, [s_status length])];
+            if (menuBarSetting == 0) {
+                [s_status addAttribute:NSBaselineOffsetAttributeName value:[NSNumber numberWithFloat: 3] range:NSMakeRange(0, [temp length])];
+                [s_status addAttribute:NSBaselineOffsetAttributeName value:[NSNumber numberWithFloat: -8] range:[s_status.string rangeOfString:fan]];
+            }
          
-            if (setColor) [s_status addAttribute:NSForegroundColorAttributeName value:menuColor  range:NSMakeRange(0,[s_status length])];
+//            if (setColor) [s_status addAttribute:NSForegroundColorAttributeName value:menuColor  range:NSMakeRange(0,[s_status length])];
             
            
             if ([statusItem respondsToSelector:@selector(button)]) {
@@ -501,7 +539,7 @@ NSUserDefaults *defaults;
             [statusItem setLength:46];
             s_status=[[NSMutableAttributedString alloc] initWithString:[NSString stringWithFormat:@"%@",temp]];
             [s_status addAttribute:NSFontAttributeName value:[NSFont fontWithName:@"Lucida Grande" size:12] range:NSMakeRange(0,[s_status length])];
-            if (setColor) [s_status addAttribute:NSForegroundColorAttributeName value:menuColor  range:NSMakeRange(0,[s_status length])];
+//            if (setColor) [s_status addAttribute:NSForegroundColorAttributeName value:menuColor  range:NSMakeRange(0,[s_status length])];
             if ([statusItem respondsToSelector:@selector(button)]) {
                 [statusItem.button setAttributedTitle:s_status];
                 [statusItem.button setImage:nil];
@@ -517,7 +555,7 @@ NSUserDefaults *defaults;
             [statusItem setLength:65];
             s_status=[[NSMutableAttributedString alloc] initWithString:[NSString stringWithFormat:@"%@",fan]];
             [s_status addAttribute:NSFontAttributeName value:[NSFont fontWithName:@"Lucida Grande" size:12] range:NSMakeRange(0,[s_status length])];
-            if (setColor) [s_status addAttribute:NSForegroundColorAttributeName value:menuColor  range:NSMakeRange(0,[s_status length])];
+//            if (setColor) [s_status addAttribute:NSForegroundColorAttributeName value:menuColor  range:NSMakeRange(0,[s_status length])];
             if ([statusItem respondsToSelector:@selector(button)]) {
                 [statusItem.button setAttributedTitle:s_status];
                 [statusItem.button setImage:nil];
@@ -532,6 +570,52 @@ NSUserDefaults *defaults;
     
 }
 
+- (NSArray *)defaultFansRPM {
+    return @[@(2500), @(3500), @(4500), @(5000), @(6000), @(6500), @(7000)];
+}
+
+- (void)autoAdjustRPM:(int)temp {
+    int index = 0;
+//    if (temp > 85) {//max auto
+//        index = 0;
+//    } else if (temp > 82) {//6500
+//        index = 6;
+//    } else if (temp > 76) {//6000
+//        index = 5;
+//    } else if (temp > 72) {//5000
+//        index = 4;
+//    } else if (temp > 65) {//4500
+//        index = 3;
+//    } else if (temp > 55) {//3500
+//        index = 2;
+//    } else if (temp > 48) {//2500
+//        index = 1;
+//    } else {//auto
+//        index = 0;
+//    }
+    if (temp > 85) {//7000 auto
+        index = 7;
+    } else if (temp > 82) {//6500
+        index = 6;
+    } else if (temp > 76) {//6000
+        index = 5;
+    } else if (temp > 70) {//5000
+        index = 4;
+    } else if (temp > 62) {//4500
+        index = 3;
+    } else if (temp > 55) {//3500
+        index = 2;
+    } else if (temp > 48) {//2500
+        index = 1;
+    } else {//1200 auto
+        index = 0;
+    }
+    if (lastIndex == index) {
+        return;
+    }
+    [self apply_settings:nil controllerindex:index];
+    lastIndex = index;
+}
 
 - (IBAction)savePreferences:(id)sender{
 	[(NSUserDefaultsController *)DefaultsController save:sender];
